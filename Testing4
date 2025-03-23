@@ -1,0 +1,316 @@
+# ==== Import Libraries ====
+print("Starting script execution...")
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, cross_val_score, KFold
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_curve, auc, confusion_matrix, roc_auc_score
+from sklearn.ensemble import VotingClassifier, StackingClassifier
+from sklearn.calibration import calibration_curve
+from imblearn.over_sampling import SMOTE
+import tensorflow as tf
+import warnings
+import requests
+from zipfile import ZipFile
+from io import BytesIO
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
+
+# Check GPU availability
+print("\nChecking GPU availability...")
+try:
+    physical_devices = tf.config.list_physical_devices('GPU')
+    if physical_devices:
+        print(f"GPU is available: {physical_devices}")
+        # Enable memory growth for GPU
+        for device in physical_devices:
+            tf.config.experimental.set_memory_growth(device, True)
+    else:
+        print("No GPU found. Running on CPU.")
+except Exception as e:
+    print(f"Error checking GPU: {e}")
+    print("Running on CPU.")
+
+print("All imports completed successfully")
+
+# ==== Load and Preprocess Data ====
+print("\nLoading data...")
+try:
+    # Download and load data from UCI repository
+    url = "https://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank-additional.zip"
+    print("Downloading dataset...")
+    response = requests.get(url)
+    zipfile = ZipFile(BytesIO(response.content))
+    csv_file = "bank-additional/bank-additional-full.csv"
+    with zipfile.open(csv_file) as file:
+        df = pd.read_csv(file, sep=';')
+    print("Data loaded successfully!")
+except Exception as e:
+    print(f"Error loading data: {e}")
+    print("Please check your internet connection or download the dataset manually.")
+    exit()
+
+# Preprocess data
+print("\nPreprocessing data...")
+df_processed = df.copy()
+
+# Handle categorical variables
+categorical_columns = df_processed.select_dtypes(include=['object']).columns
+label_encoders = {}
+for column in categorical_columns:
+    if column != 'y':  # Skip target variable
+        label_encoders[column] = LabelEncoder()
+        df_processed[column] = label_encoders[column].fit_transform(df_processed[column].astype(str))
+
+# Encode target variable
+label_encoders['y'] = LabelEncoder()
+df_processed['y'] = label_encoders['y'].fit_transform(df_processed['y'])
+
+# Split features and target
+X = df_processed.drop('y', axis=1)
+y = df_processed['y']
+
+# Split the data
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42, stratify=y
+)
+
+# Apply SMOTE for handling class imbalance
+smote = SMOTE(random_state=42)
+X_train_smote, y_train_smote = smote.fit_resample(X_train, y_train)
+
+print("Data preprocessing completed successfully!")
+print(f"Training set shape: {X_train_smote.shape}")
+print(f"Testing set shape: {X_test.shape}")
+
+# ==== Create and Train Neural Network ====
+print("\nCreating Neural Network model...")
+def create_nn_model(input_shape):
+    model = tf.keras.Sequential([
+        tf.keras.layers.Dense(128, activation='relu', input_shape=input_shape),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.Dropout(0.3),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.Dropout(0.3),
+        tf.keras.layers.Dense(32, activation='relu'),
+        tf.keras.layers.BatchNormalization(),
+        tf.keras.layers.Dropout(0.3),
+        tf.keras.layers.Dense(1, activation='sigmoid')
+    ])
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+        loss='binary_crossentropy',
+        metrics=['accuracy', tf.keras.metrics.AUC()]
+    )
+    return model
+
+# Create and train neural network
+nn_model = create_nn_model((X_train_smote.shape[1],))
+print("\nTraining Neural Network...")
+
+# Early stopping to prevent overfitting
+early_stopping = tf.keras.callbacks.EarlyStopping(
+    monitor='val_loss',
+    patience=5,
+    restore_best_weights=True
+)
+
+# Train the model
+history = nn_model.fit(
+    X_train_smote, y_train_smote,
+    epochs=50,
+    batch_size=32,
+    validation_split=0.2,
+    callbacks=[early_stopping],
+    verbose=1
+)
+
+# Evaluate neural network
+print("\nEvaluating Neural Network...")
+nn_pred = (nn_model.predict(X_test) > 0.5).astype(int)
+nn_accuracy = accuracy_score(y_test, nn_pred)
+nn_precision = precision_score(y_test, nn_pred)
+nn_recall = recall_score(y_test, nn_pred)
+nn_f1 = f1_score(y_test, nn_pred)
+
+print("\nNeural Network Performance:")
+print(f"Accuracy: {nn_accuracy:.4f}")
+print(f"Precision: {nn_precision:.4f}")
+print(f"Recall: {nn_recall:.4f}")
+print(f"F1 Score: {nn_f1:.4f}")
+
+# ==== Train Random Forest ====
+print("\nTraining Random Forest model...")
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+rf_model.fit(X_train_smote, y_train_smote)
+
+# Make predictions
+rf_pred = rf_model.predict(X_test)
+
+# Calculate metrics
+rf_accuracy = accuracy_score(y_test, rf_pred)
+rf_precision = precision_score(y_test, rf_pred)
+rf_recall = recall_score(y_test, rf_pred)
+rf_f1 = f1_score(y_test, rf_pred)
+
+print("\nRandom Forest Performance:")
+print(f"Accuracy: {rf_accuracy:.4f}")
+print(f"Precision: {rf_precision:.4f}")
+print(f"Recall: {rf_recall:.4f}")
+print(f"F1 Score: {rf_f1:.4f}")
+
+# ==== Create Ensemble Models ====
+print("\nCreating ensemble models...")
+
+# Create base models
+base_models = {
+    'rf': RandomForestClassifier(n_estimators=100, random_state=42),
+    'gb': GradientBoostingClassifier(random_state=42),
+    'ada': AdaBoostClassifier(random_state=42)
+}
+
+# Create voting classifier
+voting_clf = VotingClassifier(
+    estimators=[
+        ('rf', base_models['rf']),
+        ('gb', base_models['gb']),
+        ('ada', base_models['ada'])
+    ],
+    voting='soft'
+)
+
+# Create stacking classifier
+final_estimator = LogisticRegression(max_iter=1000)
+stacking_clf = StackingClassifier(
+    estimators=[
+        ('rf', base_models['rf']),
+        ('gb', base_models['gb']),
+        ('ada', base_models['ada'])
+    ],
+    final_estimator=final_estimator,
+    cv=5
+)
+
+# Train and evaluate voting classifier
+print("\nTraining Voting Classifier...")
+voting_clf.fit(X_train_smote, y_train_smote)
+voting_pred = voting_clf.predict(X_test)
+
+voting_accuracy = accuracy_score(y_test, voting_pred)
+voting_precision = precision_score(y_test, voting_pred)
+voting_recall = recall_score(y_test, voting_pred)
+voting_f1 = f1_score(y_test, voting_pred)
+
+print("\nVoting Classifier Performance:")
+print(f"Accuracy: {voting_accuracy:.4f}")
+print(f"Precision: {voting_precision:.4f}")
+print(f"Recall: {voting_recall:.4f}")
+print(f"F1 Score: {voting_f1:.4f}")
+
+# Train and evaluate stacking classifier
+print("\nTraining Stacking Classifier...")
+stacking_clf.fit(X_train_smote, y_train_smote)
+stacking_pred = stacking_clf.predict(X_test)
+
+stacking_accuracy = accuracy_score(y_test, stacking_pred)
+stacking_precision = precision_score(y_test, stacking_pred)
+stacking_recall = recall_score(y_test, stacking_pred)
+stacking_f1 = f1_score(y_test, stacking_pred)
+
+print("\nStacking Classifier Performance:")
+print(f"Accuracy: {stacking_accuracy:.4f}")
+print(f"Precision: {stacking_precision:.4f}")
+print(f"Recall: {stacking_recall:.4f}")
+print(f"F1 Score: {stacking_f1:.4f}")
+
+# ==== Plot Results ====
+print("\nGenerating plots...")
+
+# Plot training history
+plt.figure(figsize=(12, 5))
+
+# Plot loss
+plt.subplot(1, 2, 1)
+plt.plot(history.history['loss'], label='Training Loss')
+plt.plot(history.history['val_loss'], label='Validation Loss')
+plt.title('Model Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+
+# Plot accuracy
+plt.subplot(1, 2, 2)
+plt.plot(history.history['accuracy'], label='Training Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.title('Model Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+
+plt.tight_layout()
+plt.savefig('training_history.png')
+plt.close()
+
+# Plot feature importance for Random Forest
+feature_importance = pd.DataFrame({
+    'feature': X.columns,
+    'importance': rf_model.feature_importances_
+}).sort_values('importance', ascending=False)
+
+plt.figure(figsize=(10, 6))
+sns.barplot(x='importance', y='feature', data=feature_importance.head(10))
+plt.title('Top 10 Most Important Features (Random Forest)')
+plt.tight_layout()
+plt.savefig('feature_importance.png')
+plt.close()
+
+# Plot ROC curves
+plt.figure(figsize=(10, 8))
+
+# Neural Network ROC
+nn_proba = nn_model.predict(X_test)
+fpr_nn, tpr_nn, _ = roc_curve(y_test, nn_proba)
+roc_auc_nn = auc(fpr_nn, tpr_nn)
+plt.plot(fpr_nn, tpr_nn, label=f'Neural Network (AUC = {roc_auc_nn:.2f})')
+
+# Random Forest ROC
+rf_proba = rf_model.predict_proba(X_test)[:, 1]
+fpr_rf, tpr_rf, _ = roc_curve(y_test, rf_proba)
+roc_auc_rf = auc(fpr_rf, tpr_rf)
+plt.plot(fpr_rf, tpr_rf, label=f'Random Forest (AUC = {roc_auc_rf:.2f})')
+
+# Voting Classifier ROC
+voting_proba = voting_clf.predict_proba(X_test)[:, 1]
+fpr_voting, tpr_voting, _ = roc_curve(y_test, voting_proba)
+roc_auc_voting = auc(fpr_voting, tpr_voting)
+plt.plot(fpr_voting, tpr_voting, label=f'Voting Classifier (AUC = {roc_auc_voting:.2f})')
+
+# Stacking Classifier ROC
+stacking_proba = stacking_clf.predict_proba(X_test)[:, 1]
+fpr_stacking, tpr_stacking, _ = roc_curve(y_test, stacking_proba)
+roc_auc_stacking = auc(fpr_stacking, tpr_stacking)
+plt.plot(fpr_stacking, tpr_stacking, label=f'Stacking Classifier (AUC = {roc_auc_stacking:.2f})')
+
+plt.plot([0, 1], [0, 1], 'k--')
+plt.xlim([0.0, 1.0])
+plt.ylim([0.0, 1.05])
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curves for All Models')
+plt.legend(loc="lower right")
+plt.grid(True)
+plt.savefig('roc_curves.png')
+plt.close()
+
+print("\nAnalysis completed successfully!")
+print("Plots have been saved as:")
+print("- training_history.png")
+print("- feature_importance.png")
+print("- roc_curves.png")

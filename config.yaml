@@ -1,0 +1,20 @@
+# Data configuration
+random_state: 42
+test_size: 0.2
+validation_size: 0.2
+batch_size: 1000
+
+# Model configuration
+cv_folds: 3
+n_jobs: -1  # Use all CPU cores
+
+# Model parameters
+rf_n_estimators: 100
+gb_n_estimators: 100
+
+# File paths
+data_path: "bank-additional-full.csv"
+models_dir: "models"
+plots_dir: "plots"
+reports_dir: "reports"
+logs_dir: "logs" 

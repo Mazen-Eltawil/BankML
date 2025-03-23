@@ -1,0 +1,1088 @@
+# First, install and upgrade required packages
+!pip install --upgrade numpy pandas scikit-learn matplotlib seaborn plotly weasyprint pdfkit xgboost lightgbm tqdm
+!pip install --upgrade catboost
+!pip install tqdm
+
+# Import all required libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, cross_val_score
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier, VotingClassifier, StackingClassifier
+from sklearn.svm import SVC
+from sklearn.feature_selection import SelectFromModel
+from sklearn.metrics import (
+    classification_report, confusion_matrix, accuracy_score,
+    precision_score, recall_score, f1_score, roc_curve, auc,
+    precision_recall_curve, average_precision_score
+)
+from imblearn.over_sampling import SMOTE
+from imblearn.combine import SMOTETomek
+import requests
+from zipfile import ZipFile
+from io import BytesIO
+import warnings
+import matplotlib.ticker as mtick
+import os
+from typing import Tuple, Dict, List, Optional, Any
+import logging
+from datetime import datetime
+import joblib
+import json
+import shutil
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import plotly.io as pio
+from weasyprint import HTML
+import pdfkit
+from tqdm import tqdm
+from tqdm.auto import tqdm as tqdm_auto
+
+# Check if running in Google Colab
+try:
+    from google.colab import drive
+    IN_COLAB = True
+except ImportError:
+    IN_COLAB = False
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bank_marketing_analysis.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
+
+# Try to import additional models
+try:
+    from xgboost import XGBClassifier
+    from lightgbm import LGBMClassifier
+    try:
+        from catboost import CatBoostClassifier
+        has_catboost = True
+    except ImportError:
+        has_catboost = False
+        logger.warning("CatBoost not available, will skip it")
+    has_advanced_models = True
+    logger.info("Advanced models (XGBoost, LightGBM) imported successfully")
+except ImportError as e:
+    logger.warning(f"Some advanced models not available: {e}")
+    has_advanced_models = False
+    has_catboost = False
+
+# Set style for plots
+sns.set_theme(style="whitegrid")
+plt.rcParams['figure.figsize'] = (10, 6)
+plt.rcParams['axes.titlesize'] = 14
+plt.rcParams['axes.labelsize'] = 12
+
+class BankMarketingAnalysis:
+    """Main class for Bank Marketing Campaign Analysis."""
+
+    def __init__(self):
+        """Initialize the analysis pipeline."""
+        if IN_COLAB:
+            # Mount Google Drive
+            drive.mount('/content/drive')
+            # Set up directories in Google Drive
+            self.base_dir = '/content/drive/MyDrive/bank_marketing_analysis'
+        else:
+            self.base_dir = os.getcwd()
+
+        self.setup_directories()
+        self.data = None
+        self.data_dict = self.create_data_dictionary()
+        self.models = {}
+        self.results = {}
+        self.best_model = None
+        self.feature_importance = None
+
+    def setup_directories(self) -> None:
+        """Create necessary directories for outputs."""
+        directories = ['plots', 'models', 'reports', 'results']
+        for directory in directories:
+            dir_path = os.path.join(self.base_dir, directory)
+            if not os.path.exists(dir_path):
+                os.makedirs(dir_path)
+                logger.info(f"Created directory: {dir_path}")
+
+    def load_data(self, url: str = "https://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank-additional.zip",
+                  local_path: str = "bank-additional-full.csv") -> None:
+        """
+        Load data from URL or local file with error handling.
+
+        Args:
+            url: URL to download data from
+            local_path: Local path to fallback file
+        """
+        logger.info("Attempting to load data...")
+        try:
+            response = requests.get(url)
+            zipfile = ZipFile(BytesIO(response.content))
+            csv_file = "bank-additional/bank-additional-full.csv"
+            with zipfile.open(csv_file) as file:
+                self.data = pd.read_csv(file, sep=';')
+            logger.info("Data loaded successfully from URL")
+        except Exception as e:
+            logger.warning(f"Error loading from URL: {e}")
+            try:
+                self.data = pd.read_csv(local_path, sep=';')
+                logger.info("Data loaded successfully from local file")
+            except Exception as e:
+                logger.error(f"Failed to load data: {e}")
+                raise FileNotFoundError("Could not load data from either URL or local file")
+
+    def validate_data(self) -> Tuple[bool, List[str]]:
+        """
+        Validate the loaded dataset for required columns and data types.
+
+        Returns:
+            Tuple[bool, List[str]]: (is_valid, list of issues)
+        """
+        issues = []
+        required_columns = [
+            'age', 'job', 'marital', 'education', 'default', 'housing', 'loan',
+            'contact', 'month', 'day_of_week', 'duration', 'campaign', 'pdays',
+            'previous', 'poutcome', 'emp.var.rate', 'cons.price.idx',
+            'cons.conf.idx', 'euribor3m', 'nr.employed', 'y'
+        ]
+
+        # Check for required columns
+        missing_cols = set(required_columns) - set(self.data.columns)
+        if missing_cols:
+            issues.append(f"Missing required columns: {missing_cols}")
+
+        # Check for data types
+        expected_types = {
+            'age': ['int64'],
+            'duration': ['int64'],
+            'campaign': ['int64'],
+            'pdays': ['int64'],
+            'previous': ['int64'],
+            'emp.var.rate': ['float64'],
+            'cons.price.idx': ['float64'],
+            'cons.conf.idx': ['float64'],
+            'euribor3m': ['float64'],
+            'nr.employed': ['float64']
+        }
+
+        for col, types in expected_types.items():
+            if col in self.data.columns and str(self.data[col].dtype) not in types:
+                issues.append(f"Column {col} has incorrect data type: {self.data[col].dtype}")
+
+        # Check for missing values
+        missing_values = self.data.isnull().sum()
+        if missing_values.any():
+            issues.append(f"Missing values found in columns: {missing_values[missing_values > 0].index.tolist()}")
+
+        return len(issues) == 0, issues
+
+    @staticmethod
+    def create_data_dictionary() -> Dict[str, str]:
+        """Create and return the data dictionary."""
+        return {
+            'age': 'Client age (numeric)',
+            'job': 'Type of job (categorical)',
+            'marital': 'Marital status (categorical)',
+            'education': 'Education level (categorical)',
+            'default': 'Has credit in default? (categorical)',
+            'housing': 'Has housing loan? (categorical)',
+            'loan': 'Has personal loan? (categorical)',
+            'contact': 'Contact communication type (categorical)',
+            'month': 'Last contact month of year (categorical)',
+            'day_of_week': 'Last contact day of the week (categorical)',
+            'duration': 'Last contact duration, in seconds (numeric) - IMPORTANT NOTE: this feature highly affects the target variable, but would not be known before a call',
+            'campaign': 'Number of contacts performed during this campaign for this client (numeric)',
+            'pdays': 'Number of days that passed by after the client was last contacted (numeric, 999 means client was not previously contacted)',
+            'previous': 'Number of contacts performed before this campaign (numeric)',
+            'poutcome': 'Outcome of the previous marketing campaign (categorical)',
+            'emp.var.rate': 'Employment variation rate - quarterly indicator (numeric)',
+            'cons.price.idx': 'Consumer price index - monthly indicator (numeric)',
+            'cons.conf.idx': 'Consumer confidence index - monthly indicator (numeric)',
+            'euribor3m': 'Euribor 3 month rate - daily indicator (numeric)',
+            'nr.employed': 'Number of employees - quarterly indicator (numeric)',
+            'y': 'Has the client subscribed a term deposit? (binary: "yes","no")'
+        }
+
+    def perform_eda(self) -> None:
+        """Perform Exploratory Data Analysis and generate visualizations."""
+        logger.info("Starting Exploratory Data Analysis...")
+
+        # Basic dataset overview
+        logger.info(f"Dataset shape: {self.data.shape}")
+        logger.info(f"Number of records: {self.data.shape[0]}")
+        logger.info(f"Number of features: {self.data.shape[1]}")
+
+        # Data types
+        logger.info("\nData Types:")
+        logger.info(self.data.dtypes)
+
+        # Missing values
+        missing_values = self.data.isnull().sum()
+        missing_percent = (missing_values / len(self.data)) * 100
+        missing_data = pd.DataFrame({
+            'Missing Values': missing_values,
+            'Percentage': missing_percent.round(2)
+        })
+        logger.info("\nMissing Values Summary:")
+        logger.info(missing_data[missing_data['Missing Values'] > 0])
+
+        # Unknown values in categorical features
+        logger.info("\nDistribution of 'unknown' values in categorical columns:")
+        for col in self.data.select_dtypes(include=['object']).columns:
+            unknown_count = (self.data[col] == 'unknown').sum()
+            if unknown_count > 0:
+                logger.info(f"{col}: {unknown_count} ({unknown_count/len(self.data)*100:.2f}%)")
+
+        # Summary statistics
+        logger.info("\nSummary Statistics for Numerical Features:")
+        logger.info(self.data.describe())
+
+        # Target variable distribution
+        target_counts = self.data['y'].value_counts()
+        logger.info("\nTarget Variable Distribution:")
+        logger.info(target_counts)
+        logger.info(f"Percentage of 'yes': {target_counts['yes']/len(self.data)*100:.2f}%")
+        logger.info(f"Percentage of 'no': {target_counts['no']/len(self.data)*100:.2f}%")
+
+        # Generate visualizations
+        self._create_visualizations()
+
+    def _create_visualizations(self) -> None:
+        """Create all EDA visualizations with both static and interactive versions."""
+        logger.info("Creating visualizations...")
+        visualizations = [
+            ('class_distribution', 'Class Distribution (Target Variable)'),
+            ('age_distribution', 'Age Distribution by Subscription Status'),
+            ('campaign_distribution', 'Number of Contacts During Campaign'),
+            ('job_subscription_rate', 'Subscription Rate by Job Type'),
+            ('correlation_matrix', 'Correlation Matrix of Numerical Features'),
+            ('economic_indicators', 'Economic Indicators by Subscription Status'),
+            ('month_analysis', 'Contact Volume and Subscription Rate by Month')
+        ]
+
+        for viz_name, title in tqdm(visualizations, desc="Creating visualizations"):
+            if viz_name == 'class_distribution':
+                fig = px.histogram(self.data, x='y', title=title,
+                                 labels={'y': 'Subscription', 'count': 'Count'})
+                fig.update_layout(showlegend=False)
+            elif viz_name == 'age_distribution':
+                fig = px.histogram(self.data, x='age', color='y', marginal='box',
+                                 title=title, labels={'age': 'Age', 'count': 'Count'})
+            elif viz_name == 'campaign_distribution':
+                fig = px.box(self.data, x='y', y='campaign',
+                            title=title, labels={'y': 'Subscription', 'campaign': 'Number of Contacts'})
+            elif viz_name == 'job_subscription_rate':
+                job_subscription = pd.crosstab(self.data['job'], self.data['y'], normalize='index') * 100
+                fig = px.bar(job_subscription, title=title,
+                            labels={'value': 'Percentage (%)', 'job': 'Job Type'})
+                fig.update_layout(yaxis_tickformat='.1f')
+            elif viz_name == 'correlation_matrix':
+                numerical_df = self.data.select_dtypes(include=['int64', 'float64'])
+                corr_matrix = numerical_df.corr()
+                fig = px.imshow(corr_matrix, title=title,
+                               color_continuous_scale='RdBu')
+            elif viz_name == 'economic_indicators':
+                fig = make_subplots(rows=2, cols=2, subplot_titles=(
+                    'Employment Variation Rate', 'Consumer Price Index',
+                    'Consumer Confidence Index', 'Euribor 3 Month Rate'
+                ))
+                fig.add_trace(go.Box(x=self.data['y'], y=self.data['emp.var.rate']), row=1, col=1)
+                fig.add_trace(go.Box(x=self.data['y'], y=self.data['cons.price.idx']), row=1, col=2)
+                fig.add_trace(go.Box(x=self.data['y'], y=self.data['cons.conf.idx']), row=2, col=1)
+                fig.add_trace(go.Box(x=self.data['y'], y=self.data['euribor3m']), row=2, col=2)
+                fig.update_layout(height=800, title_text=title)
+            elif viz_name == 'month_analysis':
+                month_order = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+                              'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+                month_counts = self.data['month'].value_counts().reindex(month_order)
+                month_subscription = pd.crosstab(self.data['month'], self.data['y'], normalize='index')['yes'] * 100
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
+                fig.add_trace(go.Bar(x=month_counts.index, y=month_counts.values, name="Contact Count"),
+                            secondary_y=False)
+                fig.add_trace(go.Scatter(x=month_order, y=[month_subscription.get(m, 0) for m in month_order],
+                                      mode='lines+markers', name="Subscription Rate"),
+                            secondary_y=True)
+                fig.update_layout(title_text=title)
+                fig.update_xaxes(title_text="Month")
+                fig.update_yaxes(title_text="Number of Contacts", secondary_y=False)
+                fig.update_yaxes(title_text="Subscription Rate (%)", secondary_y=True)
+
+            # Save both interactive and static versions
+            fig.write_html(os.path.join(self.base_dir, f'plots/{viz_name}_interactive.html'))
+            fig.write_image(os.path.join(self.base_dir, f'plots/{viz_name}.png'))
+
+        logger.info("All visualizations created successfully")
+
+    def engineer_features(self) -> None:
+        """Perform feature engineering on the dataset."""
+        logger.info("Starting Feature Engineering...")
+
+        # Make a copy of the original dataframe
+        self.data_with_features = self.data.copy()
+
+        # 1. Age groups
+        self.data_with_features['age_group'] = pd.cut(
+            self.data_with_features['age'],
+            bins=[17, 30, 40, 50, 60, 100],
+            labels=['18-30', '31-40', '41-50', '51-60', '60+']
+        )
+
+        # 2. Contact frequency
+        self.data_with_features['total_contacts'] = (
+            self.data_with_features['campaign'] +
+            self.data_with_features['previous']
+        )
+
+        # 3. Is First Contact
+        self.data_with_features['is_first_contact'] = (
+            self.data_with_features['previous'] == 0
+        ).astype(int)
+
+        # 4. Was Previously Successful
+        self.data_with_features['was_successful'] = (
+            self.data_with_features['poutcome'] == 'success'
+        ).astype(int)
+
+        # 5. Economic indicator composite
+        self.data_with_features['economic_score'] = (
+            (self.data_with_features['emp.var.rate'] - self.data_with_features['emp.var.rate'].min()) /
+            (self.data_with_features['emp.var.rate'].max() - self.data_with_features['emp.var.rate'].min())
+        ) - (
+            (self.data_with_features['cons.conf.idx'] - self.data_with_features['cons.conf.idx'].min()) /
+            (self.data_with_features['cons.conf.idx'].max() - self.data_with_features['cons.conf.idx'].min())
+        ) + (
+            (self.data_with_features['euribor3m'] - self.data_with_features['euribor3m'].min()) /
+            (self.data_with_features['euribor3m'].max() - self.data_with_features['euribor3m'].min())
+        )
+
+        # 6. Education level numeric
+        education_map = {
+            'illiterate': 0,
+            'basic.4y': 1,
+            'basic.6y': 2,
+            'basic.9y': 3,
+            'high.school': 4,
+            'professional.course': 5,
+            'university.degree': 6
+        }
+        self.data_with_features['education_level'] = self.data_with_features['education'].map(education_map)
+        self.data_with_features['education_level'] = self.data_with_features['education_level'].fillna(
+            self.data_with_features['education_level'].median()
+        )
+
+        # 7. Season based on month
+        season_map = {
+            'dec': 'winter', 'jan': 'winter', 'feb': 'winter',
+            'mar': 'spring', 'apr': 'spring', 'may': 'spring',
+            'jun': 'summer', 'jul': 'summer', 'aug': 'summer',
+            'sep': 'fall', 'oct': 'fall', 'nov': 'fall'
+        }
+        self.data_with_features['season'] = self.data_with_features['month'].map(season_map)
+
+        # 8. Has loans
+        self.data_with_features['has_any_loan'] = (
+            (self.data_with_features['housing'] == 'yes') |
+            (self.data_with_features['loan'] == 'yes')
+        ).astype(int)
+
+        # 9. Contact ratio
+        self.data_with_features['contact_ratio'] = (
+            self.data_with_features['campaign'] /
+            (self.data_with_features['total_contacts'] + 1)
+        )
+
+        # Visualize new features
+        plt.figure(figsize=(12, 5))
+        plt.subplot(1, 2, 1)
+        sns.countplot(x='age_group', hue='y', data=self.data_with_features)
+        plt.title('Subscription by Age Group')
+        plt.xticks(rotation=45)
+
+        plt.subplot(1, 2, 2)
+        sns.countplot(x='season', hue='y', data=self.data_with_features)
+        plt.title('Subscription by Season')
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.base_dir, 'plots/engineered_features.png'))
+        plt.close()
+
+        logger.info("Feature engineering completed successfully")
+
+    def preprocess_data(self) -> None:
+        """Preprocess the data for modeling."""
+        logger.info("Starting Data Preprocessing...")
+
+        # Create two versions of the dataset
+        self.X_with_duration, self.y = self._preprocess_data(self.data_with_features, include_duration=True)
+        self.X_without_duration, _ = self._preprocess_data(self.data_with_features, include_duration=False)
+
+        logger.info("Data preprocessing completed successfully")
+
+    def _preprocess_data(self, df: pd.DataFrame, include_duration: bool = True) -> Tuple[pd.DataFrame, pd.Series]:
+        """
+        Preprocess the data with the specified configuration.
+
+        Args:
+            df: DataFrame to preprocess
+            include_duration: Whether to include the duration feature
+
+        Returns:
+            Tuple[pd.DataFrame, pd.Series]: Preprocessed features and target
+        """
+        logger.info(f"Preprocessing data {'with' if include_duration else 'without'} duration feature...")
+
+        # Create a working copy
+        df_processed = df.copy()
+
+        # Handle Missing Values
+        logger.info("Handling missing values...")
+        cat_cols = df_processed.select_dtypes(include=['object']).columns
+        for col in cat_cols:
+            unknown_pct = (df_processed[col] == 'unknown').mean() * 100
+            if unknown_pct > 20:
+                logger.info(f"  '{col}': High unknown rate ({unknown_pct:.1f}%). Keeping 'unknown' as a category.")
+            else:
+                mode_val = df_processed[col][df_processed[col] != 'unknown'].mode()[0]
+                df_processed[col] = df_processed[col].replace('unknown', mode_val)
+                logger.info(f"  '{col}': Replaced 'unknown' with '{mode_val}'")
+
+        # Encode target variable
+        logger.info("Encoding target variable...")
+        le = LabelEncoder()
+        df_processed['y'] = le.fit_transform(df_processed['y'])
+        logger.info("Target mapping: 'no': 0, 'yes': 1")
+
+        # Select features
+        feature_cols = df_processed.columns.tolist()
+        feature_cols.remove('y')
+
+        if not include_duration and 'duration' in feature_cols:
+            feature_cols.remove('duration')
+            logger.info("Excluded 'duration' feature to prevent data leakage")
+
+        # Separate features and target
+        X = df_processed[feature_cols]
+        y = df_processed['y']
+
+        # Split into numerical and categorical columns
+        num_cols = X.select_dtypes(include=['int64', 'float64']).columns
+        cat_cols = X.select_dtypes(exclude=['int64', 'float64']).columns
+
+        # One-hot encoding for categorical features
+        logger.info(f"Applying one-hot encoding to {len(cat_cols)} categorical features...")
+        X = pd.get_dummies(X, columns=cat_cols, drop_first=True)
+
+        # Scale numerical features
+        logger.info("Scaling numerical features...")
+        scaler = StandardScaler()
+        X[num_cols] = scaler.fit_transform(X[num_cols])
+
+        logger.info(f"Final preprocessed feature set shape: {X.shape}")
+        return X, y
+
+    def train_models(self) -> None:
+        """Train and evaluate multiple models."""
+        logger.info("Starting Model Training...")
+
+        # Split the data
+        self._split_data()
+
+        # Handle class imbalance
+        self._handle_imbalance()
+
+        # Define models
+        self._define_models()
+
+        # Train and evaluate models
+        self._train_and_evaluate_models()
+
+        logger.info("Model training completed successfully")
+
+    def _split_data(self) -> None:
+        """Split the data into training and testing sets."""
+        # Split with duration
+        self.X_train_with, self.X_test_with, self.y_train_with, self.y_test_with = train_test_split(
+            self.X_with_duration, self.y, test_size=0.3, stratify=self.y, random_state=42
+        )
+
+        # Split without duration
+        self.X_train_without, self.X_test_without, self.y_train_without, self.y_test_without = train_test_split(
+            self.X_without_duration, self.y, test_size=0.3, stratify=self.y, random_state=42
+        )
+
+        logger.info(f"Training set shape (with duration): {self.X_train_with.shape}")
+        logger.info(f"Testing set shape (with duration): {self.X_test_with.shape}")
+        logger.info(f"Training set shape (without duration): {self.X_train_without.shape}")
+        logger.info(f"Testing set shape (without duration): {self.X_test_without.shape}")
+
+    def _handle_imbalance(self) -> None:
+        """Handle class imbalance using SMOTE."""
+        smote = SMOTE(random_state=42)
+
+        # Apply SMOTE to both datasets
+        self.X_train_with_smote, self.y_train_with_smote = smote.fit_resample(
+            self.X_train_with, self.y_train_with
+        )
+        self.X_train_without_smote, self.y_train_without_smote = smote.fit_resample(
+            self.X_train_without, self.y_train_without
+        )
+
+        logger.info(f"Original training set class distribution: {np.bincount(self.y_train_with)}")
+        logger.info(f"After SMOTE: {np.bincount(self.y_train_with_smote)}")
+
+        # Visualize class distribution after SMOTE
+        self._visualize_smote_results()
+
+    def _visualize_smote_results(self) -> None:
+        """Visualize class distribution before and after SMOTE."""
+        plt.figure(figsize=(10, 6))
+        labels = ['No (class 0)', 'Yes (class 1)']
+        original = np.bincount(self.y_train_with)
+        after_smote = np.bincount(self.y_train_with_smote)
+
+        x = np.arange(len(labels))
+        width = 0.35
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.bar(x - width/2, original, width, label='Original')
+        ax.bar(x + width/2, after_smote, width, label='After SMOTE')
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels)
+        ax.set_ylabel('Count')
+        ax.set_title('Class Distribution Before and After SMOTE')
+        ax.legend()
+
+        # Add count labels
+        for i, v in enumerate(original):
+            ax.text(i - width/2, v + 100, str(v), ha='center')
+        for i, v in enumerate(after_smote):
+            ax.text(i + width/2, v + 100, str(v), ha='center')
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.base_dir, 'plots/smote_rebalancing.png'))
+        plt.close()
+
+    def _define_models(self) -> None:
+        """Define the models to train."""
+        self.models = {
+            'Logistic Regression': LogisticRegression(
+                class_weight='balanced', max_iter=1000, random_state=42
+            ),
+            'Random Forest': RandomForestClassifier(
+                n_estimators=100, class_weight='balanced', random_state=42
+            ),
+            'Gradient Boosting': GradientBoostingClassifier(random_state=42),
+            'AdaBoost': AdaBoostClassifier(random_state=42)
+        }
+
+        # Add advanced models if available
+        if has_advanced_models:
+            scale_pos_weight = len(self.y_train_with[self.y_train_with==0]) / len(self.y_train_with[self.y_train_with==1])
+            self.models.update({
+                'XGBoost': XGBClassifier(scale_pos_weight=scale_pos_weight, random_state=42),
+                'LightGBM': LGBMClassifier(scale_pos_weight=scale_pos_weight, random_state=42)
+            })
+            if has_catboost:
+                self.models['CatBoost'] = CatBoostClassifier(scale_pos_weight=scale_pos_weight, random_state=42, verbose=False)
+
+    def _train_and_evaluate_models(self) -> None:
+        """Train and evaluate all models."""
+        self.all_results = []
+
+        # Evaluate models with duration
+        logger.info("\nEvaluating models with duration feature:")
+        for name, model in tqdm(self.models.items(), desc="Training models with duration"):
+            results, _ = self._evaluate_model(
+                model, self.X_train_with_smote, self.y_train_with_smote,
+                self.X_test_with, self.y_test_with, name, "with_duration"
+            )
+            self.all_results.append(results)
+
+        # Evaluate models without duration
+        logger.info("\nEvaluating models without duration feature:")
+        for name, model in tqdm(self.models.items(), desc="Training models without duration"):
+            results, _ = self._evaluate_model(
+                model, self.X_train_without_smote, self.y_train_without_smote,
+                self.X_test_without, self.y_test_without, name, "without_duration"
+            )
+            self.all_results.append(results)
+
+    def _evaluate_model(self, model, X_train, y_train, X_test, y_test, model_name, dataset_type):
+        """
+        Evaluate a single model.
+
+        Args:
+            model: The model to evaluate
+            X_train: Training features
+            y_train: Training target
+            X_test: Test features
+            y_test: Test target
+            model_name: Name of the model
+            dataset_type: Type of dataset being used
+
+        Returns:
+            Tuple[Dict, Any]: Results dictionary and trained model
+        """
+        logger.info(f"\nEvaluating {model_name} on {dataset_type} dataset...")
+
+        # Train model
+        model.fit(X_train, y_train)
+
+        # Make predictions
+        y_pred = model.predict(X_test)
+
+        # Calculate metrics
+        accuracy = accuracy_score(y_test, y_pred)
+        precision = precision_score(y_test, y_pred)
+        recall = recall_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred)
+
+        # Calculate ROC curve and AUC
+        try:
+            y_prob = model.predict_proba(X_test)[:, 1]
+            fpr, tpr, _ = roc_curve(y_test, y_prob)
+            roc_auc = auc(fpr, tpr)
+        except:
+            fpr, tpr, roc_auc = None, None, None
+
+        # Print results
+        logger.info(f"{model_name} Results:")
+        logger.info(f"Accuracy: {accuracy:.4f}")
+        logger.info(f"Precision: {precision:.4f}")
+        logger.info(f"Recall: {recall:.4f}")
+        logger.info(f"F1 Score: {f1:.4f}")
+        if roc_auc:
+            logger.info(f"ROC AUC: {roc_auc:.4f}")
+        logger.info("Classification Report:")
+        logger.info(classification_report(y_test, y_pred))
+
+        # Create visualizations
+        self._create_model_visualizations(model_name, dataset_type, y_test, y_pred, fpr, tpr, roc_auc)
+
+        # Store results
+        results = {
+            'model_name': model_name,
+            'dataset': dataset_type,
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1': f1,
+            'roc_auc': roc_auc if roc_auc else None,
+            'confusion_matrix': confusion_matrix(y_test, y_pred),
+            'y_pred': y_pred,
+            'y_test': y_test
+        }
+
+        if fpr is not None and tpr is not None:
+            results['fpr'] = fpr
+            results['tpr'] = tpr
+
+        return results, model
+
+    def _create_model_visualizations(self, model_name, dataset_type, y_test, y_pred, fpr, tpr, roc_auc):
+        """Create visualizations for model evaluation."""
+        # Confusion Matrix
+        plt.figure(figsize=(8, 6))
+        cm = confusion_matrix(y_test, y_pred)
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                   xticklabels=['No', 'Yes'],
+                   yticklabels=['No', 'Yes'])
+        plt.title(f'Confusion Matrix - {model_name} ({dataset_type})')
+        plt.xlabel('Predicted')
+        plt.ylabel('Actual')
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.base_dir, f'plots/confusion_matrix_{model_name.replace(" ", "_").lower()}_{dataset_type}.png'))
+        plt.close()
+
+        # ROC Curve
+        if fpr is not None and tpr is not None:
+            plt.figure(figsize=(8, 6))
+            plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
+            plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+            plt.xlim([0.0, 1.0])
+            plt.ylim([0.0, 1.05])
+            plt.xlabel('False Positive Rate')
+            plt.ylabel('True Positive Rate')
+            plt.title(f'ROC Curve - {model_name} ({dataset_type})')
+            plt.legend(loc="lower right")
+            plt.savefig(os.path.join(self.base_dir, f'plots/roc_curve_{model_name.replace(" ", "_").lower()}_{dataset_type}.png'))
+            plt.close()
+
+    def tune_hyperparameters(self) -> None:
+        """Perform hyperparameter tuning for the best model."""
+        logger.info("Starting Hyperparameter Tuning...")
+
+        # Find best model
+        best_model = self._find_best_model()
+
+        # Define parameter grid
+        param_grid = self._get_param_grid(best_model)
+
+        # Perform RandomizedSearchCV
+        self._perform_randomized_search(best_model, param_grid)
+
+        logger.info("Hyperparameter tuning completed successfully")
+
+    def _find_best_model(self) -> Tuple[str, Any]:
+        """Find the best performing model based on F1 score."""
+        best_score = 0
+        best_model_name = None
+        best_model = None
+
+        for result in self.all_results:
+            if result['f1'] > best_score:
+                best_score = result['f1']
+                best_model_name = result['model_name']
+                best_model = self.models[best_model_name]
+
+        logger.info(f"Best model: {best_model_name} (F1 Score: {best_score:.4f})")
+        return best_model_name, best_model
+
+    def _get_param_grid(self, model_name: str) -> Dict:
+        """Get parameter grid for the specified model."""
+        param_grids = {
+            'Random Forest': {
+                'n_estimators': [100, 200, 300],
+                'max_depth': [10, 20, 30, None],
+                'min_samples_split': [2, 5, 10],
+                'min_samples_leaf': [1, 2, 4]
+            },
+            'Gradient Boosting': {
+                'n_estimators': [100, 200, 300],
+                'learning_rate': [0.01, 0.1, 0.3],
+                'max_depth': [3, 4, 5]
+            },
+            'XGBoost': {
+                'n_estimators': [100, 200, 300],
+                'max_depth': [3, 4, 5],
+                'learning_rate': [0.01, 0.1, 0.3]
+            },
+            'LightGBM': {
+                'n_estimators': [100, 200, 300],
+                'max_depth': [3, 4, 5],
+                'learning_rate': [0.01, 0.1, 0.3]
+            }
+        }
+
+        return param_grids.get(model_name, {})
+
+    def _perform_randomized_search(self, model: Any, param_grid: Dict) -> None:
+        """Perform RandomizedSearchCV for hyperparameter tuning."""
+        logger.info("Performing RandomizedSearchCV...")
+
+        # Use the dataset with duration for tuning
+        random_search = RandomizedSearchCV(
+            model,
+            param_distributions=param_grid,
+            n_iter=20,
+            cv=5,
+            scoring='f1',
+            n_jobs=-1,
+            random_state=42
+        )
+
+        # Add progress bar for RandomizedSearchCV
+        with tqdm(total=20, desc="Hyperparameter tuning") as pbar:
+            random_search.fit(self.X_train_with_smote, self.y_train_with_smote)
+            pbar.update(20)
+
+        # Store results
+        self.best_params = random_search.best_params_
+        self.best_score = random_search.best_score_
+
+        logger.info(f"Best parameters: {self.best_params}")
+        logger.info(f"Best cross-validation score: {self.best_score:.4f}")
+
+        # Evaluate best model
+        best_model = random_search.best_estimator_
+        results, _ = self._evaluate_model(
+            best_model,
+            self.X_train_with_smote,
+            self.y_train_with_smote,
+            self.X_test_with,
+            self.y_test_with,
+            f"{model.__class__.__name__}_tuned",
+            "with_duration"
+        )
+
+        self.all_results.append(results)
+
+        # Visualize parameter importance
+        self._visualize_parameter_importance(random_search)
+
+    def _visualize_parameter_importance(self, random_search: RandomizedSearchCV) -> None:
+        """Visualize parameter importance from RandomizedSearchCV results."""
+        results = pd.DataFrame(random_search.cv_results_)
+
+        # Plot parameter importance
+        plt.figure(figsize=(12, 6))
+        param_importance = results.groupby('param_max_depth')['mean_test_score'].mean()
+        param_importance.plot(kind='bar')
+        plt.title('Parameter Importance (max_depth)')
+        plt.xlabel('max_depth')
+        plt.ylabel('Mean Test Score')
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.base_dir, 'plots/parameter_importance.png'))
+        plt.close()
+
+    def generate_report(self) -> None:
+        """Generate a comprehensive PDF report."""
+        logger.info("Generating PDF Report...")
+
+        # Create HTML content first
+        html_content = self._create_html_content()
+
+        # Save HTML temporarily
+        temp_html = 'temp_report.html'
+        with open(temp_html, 'w') as f:
+            f.write(html_content)
+
+        # Convert HTML to PDF using WeasyPrint
+        try:
+            HTML(temp_html).write_pdf(os.path.join(self.base_dir, 'bank_marketing_analysis_report.pdf'))
+            logger.info("PDF report generated successfully")
+        except Exception as e:
+            logger.error(f"Error generating PDF: {e}")
+            # Fallback to pdfkit if WeasyPrint fails
+            try:
+                pdfkit.from_file(temp_html, os.path.join(self.base_dir, 'bank_marketing_analysis_report.pdf'))
+                logger.info("PDF report generated successfully using pdfkit")
+            except Exception as e:
+                logger.error(f"Error generating PDF with pdfkit: {e}")
+                raise
+
+        # Clean up temporary HTML file
+        os.remove(temp_html)
+
+    def _create_html_content(self) -> str:
+        """Create HTML content for the report with interactive visualizations."""
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Bank Marketing Analysis Report</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 20px; }
+                h1, h2 { color: #2c3e50; }
+                .section { margin: 20px 0; padding: 20px; border: 1px solid #ddd; }
+                table { border-collapse: collapse; width: 100%; margin: 10px 0; }
+                th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+                th { background-color: #f5f5f5; }
+                img { max-width: 100%; height: auto; }
+                .interactive-plot { height: 600px; margin: 20px 0; }
+            </style>
+        </head>
+        <body>
+            <h1>Bank Marketing Analysis Report</h1>
+
+            <div class="section">
+                <h2>1. Executive Summary</h2>
+                <p>This report presents the analysis of bank marketing campaign data to predict customer subscription to term deposits.</p>
+            </div>
+
+            <div class="section">
+                <h2>2. Dataset Overview</h2>
+                <p>Total Records: {}</p>
+                <p>Features: {}</p>
+                <p>Target Variable: Subscription to term deposit (yes/no)</p>
+            </div>
+
+            <div class="section">
+                <h2>3. Key Findings</h2>
+                <ul>
+                    <li>Class Distribution: {}% subscribed, {}% did not subscribe</li>
+                    <li>Best Performing Model: {} (F1 Score: {:.4f})</li>
+                    <li>Most Important Features: {}</li>
+                </ul>
+            </div>
+
+            <div class="section">
+                <h2>4. Model Performance</h2>
+                <table>
+                    <tr>
+                        <th>Model</th>
+                        <th>Accuracy</th>
+                        <th>Precision</th>
+                        <th>Recall</th>
+                        <th>F1 Score</th>
+                    </tr>
+                    {}
+                </table>
+            </div>
+
+            <div class="section">
+                <h2>5. Interactive Visualizations</h2>
+                <h3>Class Distribution</h3>
+                <iframe src="plots/class_distribution_interactive.html" class="interactive-plot"></iframe>
+
+                <h3>Age Distribution</h3>
+                <iframe src="plots/age_distribution_interactive.html" class="interactive-plot"></iframe>
+
+                <h3>Job Subscription Rates</h3>
+                <iframe src="plots/job_subscription_rate_interactive.html" class="interactive-plot"></iframe>
+
+                <h3>Correlation Matrix</h3>
+                <iframe src="plots/correlation_matrix_interactive.html" class="interactive-plot"></iframe>
+
+                <h3>Economic Indicators</h3>
+                <iframe src="plots/economic_indicators_interactive.html" class="interactive-plot"></iframe>
+
+                <h3>Monthly Analysis</h3>
+                <iframe src="plots/month_analysis_interactive.html" class="interactive-plot"></iframe>
+            </div>
+
+            <div class="section">
+                <h2>6. Recommendations</h2>
+                <ul>
+                    <li>Focus on customers with higher economic scores</li>
+                    <li>Target customers with no housing loans</li>
+                    <li>Consider seasonal trends in campaign timing</li>
+                    <li>Optimize contact frequency based on customer characteristics</li>
+                </ul>
+            </div>
+        </body>
+        </html>
+        """
+
+        # Calculate statistics
+        total_records = len(self.data)
+        subscribed = (self.data['y'] == 'yes').mean() * 100
+        not_subscribed = 100 - subscribed
+
+        # Get best model info
+        best_model_result = max(self.all_results, key=lambda x: x['f1'])
+        best_model_name = best_model_result['model_name']
+        best_model_score = best_model_result['f1']
+
+        # Get top features
+        top_features = self._get_top_features(5)
+
+        # Create model performance table
+        model_table = ""
+        for result in self.all_results:
+            model_table += f"""
+            <tr>
+                <td>{result['model_name']}</td>
+                <td>{result['accuracy']:.4f}</td>
+                <td>{result['precision']:.4f}</td>
+                <td>{result['recall']:.4f}</td>
+                <td>{result['f1']:.4f}</td>
+            </tr>
+            """
+
+        # Format HTML content
+        html = html.format(
+            total_records,
+            len(self.data.columns),
+            subscribed,
+            not_subscribed,
+            best_model_name,
+            best_model_score,
+            ", ".join(top_features),
+            model_table
+        )
+
+        return html
+
+    def _get_top_features(self, n: int = 5) -> List[str]:
+        """Get top n most important features."""
+        # Use Random Forest feature importance
+        rf_model = self.models['Random Forest']
+        rf_model.fit(self.X_train_with_smote, self.y_train_with_smote)
+
+        # Get feature names
+        feature_names = self.X_train_with_smote.columns
+
+        # Get feature importance
+        importance = rf_model.feature_importances_
+
+        # Sort features by importance
+        feature_importance = pd.DataFrame({
+            'feature': feature_names,
+            'importance': importance
+        }).sort_values('importance', ascending=False)
+
+        return feature_importance['feature'].head(n).tolist()
+
+    def save_results(self) -> None:
+        """Save all results and visualizations."""
+        logger.info("Saving Results...")
+
+        # Create results directory if it doesn't exist
+        os.makedirs(os.path.join(self.base_dir, 'results'), exist_ok=True)
+
+        # Save model results
+        self._save_model_results()
+
+        # Save visualizations
+        self._save_visualizations()
+
+        logger.info("Results saved successfully")
+
+    def _save_model_results(self) -> None:
+        """Save model results to CSV."""
+        results_df = pd.DataFrame(self.all_results)
+        results_df.to_csv(os.path.join(self.base_dir, 'results/model_results.csv'), index=False)
+
+        # Save best parameters
+        if hasattr(self, 'best_params'):
+            with open(os.path.join(self.base_dir, 'results/best_parameters.json'), 'w') as f:
+                json.dump(self.best_params, f, indent=4)
+
+    def _save_visualizations(self) -> None:
+        """Save all visualizations."""
+        # Copy plots to results directory
+        for plot_file in os.listdir(os.path.join(self.base_dir, 'plots')):
+            shutil.copy(os.path.join(self.base_dir, 'plots', plot_file), os.path.join(self.base_dir, 'results', plot_file))
+
+def main():
+    """Main function to run the analysis pipeline."""
+    try:
+        # Initialize analysis
+        analysis = BankMarketingAnalysis()
+
+        # Load and validate data
+        analysis.load_data()
+        is_valid, issues = analysis.validate_data()
+        if not is_valid:
+            logger.error(f"Data validation failed: {issues}")
+            return
+
+        # Run analysis pipeline with progress tracking
+        steps = [
+            ("Exploratory Data Analysis", analysis.perform_eda),
+            ("Feature Engineering", analysis.engineer_features),
+            ("Data Preprocessing", analysis.preprocess_data),
+            ("Model Training", analysis.train_models),
+            ("Hyperparameter Tuning", analysis.tune_hyperparameters),
+            ("Report Generation", analysis.generate_report),
+            ("Saving Results", analysis.save_results)
+        ]
+
+        for step_name, step_func in tqdm(steps, desc="Analysis Progress"):
+            logger.info(f"Starting {step_name}...")
+            step_func()
+            logger.info(f"Completed {step_name}")
+
+        logger.info("Analysis completed successfully")
+
+        if IN_COLAB:
+            logger.info(f"Results saved to Google Drive at: {analysis.base_dir}")
+
+    except Exception as e:
+        logger.error(f"Analysis failed: {e}")
+        raise
+
+if __name__ == "__main__":
+    main()

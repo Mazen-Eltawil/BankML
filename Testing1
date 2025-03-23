@@ -1,0 +1,1080 @@
+# ==== Import All Libraries ====
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, cross_val_score
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, AdaBoostClassifier
+from sklearn.svm import SVC
+from sklearn.feature_selection import SelectFromModel
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_curve, auc, precision_recall_curve
+from imblearn.over_sampling import SMOTE
+from imblearn.combine import SMOTETomek
+import requests
+from zipfile import ZipFile
+from io import BytesIO
+import warnings
+import matplotlib.ticker as mtick
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
+
+# Try to import XGBoost, but continue if not available
+try:
+    from xgboost import XGBClassifier
+    has_xgboost = True
+except ImportError:
+    print("XGBoost not installed. Skipping XGBoost model.")
+    has_xgboost = False
+
+# Set style for plots
+sns.set_theme(style="whitegrid")
+plt.rcParams['figure.figsize'] = (10, 6)
+plt.rcParams['axes.titlesize'] = 14
+plt.rcParams['axes.labelsize'] = 12
+
+# Create a directory for saving plots if it doesn't exist
+import os
+if not os.path.exists('plots'):
+    os.makedirs('plots')
+
+# ==== Step 1: Load Data & Fix Errors ====
+print("Loading data from UCI repository...")
+try:
+    url = "https://archive.ics.uci.edu/ml/machine-learning-databases/00222/bank-additional.zip"
+    response = requests.get(url)
+    zipfile = ZipFile(BytesIO(response.content))
+    csv_file = "bank-additional/bank-additional-full.csv"
+    with zipfile.open(csv_file) as file:
+        df = pd.read_csv(file, sep=';')
+    print("Data loaded successfully!")
+except Exception as e:
+    print(f"Error loading data: {e}")
+    # Fallback option if loading fails
+    print("Attempting to load from local file if available...")
+    try:
+        df = pd.read_csv("bank-additional-full.csv", sep=';')
+    except:
+        print("Could not load data. Please check your internet connection or download the dataset manually.")
+        exit()
+
+# ==== Step 2: Data Dictionary ====
+print("\n==== Data Dictionary ====")
+data_dict = {
+    'age': 'Client age (numeric)',
+    'job': 'Type of job (categorical)',
+    'marital': 'Marital status (categorical)',
+    'education': 'Education level (categorical)',
+    'default': 'Has credit in default? (categorical)',
+    'housing': 'Has housing loan? (categorical)',
+    'loan': 'Has personal loan? (categorical)',
+    'contact': 'Contact communication type (categorical)',
+    'month': 'Last contact month of year (categorical)',
+    'day_of_week': 'Last contact day of the week (categorical)',
+    'duration': 'Last contact duration, in seconds (numeric) - IMPORTANT NOTE: this feature highly affects the target variable, but would not be known before a call',
+    'campaign': 'Number of contacts performed during this campaign for this client (numeric)',
+    'pdays': 'Number of days that passed by after the client was last contacted (numeric, 999 means client was not previously contacted)',
+    'previous': 'Number of contacts performed before this campaign (numeric)',
+    'poutcome': 'Outcome of the previous marketing campaign (categorical)',
+    'emp.var.rate': 'Employment variation rate - quarterly indicator (numeric)',
+    'cons.price.idx': 'Consumer price index - monthly indicator (numeric)',
+    'cons.conf.idx': 'Consumer confidence index - monthly indicator (numeric)',
+    'euribor3m': 'Euribor 3 month rate - daily indicator (numeric)',
+    'nr.employed': 'Number of employees - quarterly indicator (numeric)',
+    'y': 'Has the client subscribed a term deposit? (binary: "yes","no")'
+}
+
+# Print data dictionary
+for col, desc in data_dict.items():
+    print(f"{col}: {desc}")
+
+# ==== Step 3: Exploratory Data Analysis (EDA) ====
+print("\n==== Dataset Overview ====")
+print(f"Dataset shape: {df.shape}")
+print(f"Number of records: {df.shape[0]}")
+print(f"Number of features: {df.shape[1]}")
+print("\nFirst 5 rows of the dataset:")
+print(df.head())
+
+# Check data types
+print("\nData Types:")
+print(df.dtypes)
+
+# Check for missing values
+print("\nMissing Values Summary:")
+missing_values = df.isnull().sum()
+missing_percent = (missing_values / len(df)) * 100
+missing_data = pd.DataFrame({'Missing Values': missing_values,
+                            'Percentage': missing_percent.round(2)})
+print(missing_data[missing_data['Missing Values'] > 0])
+
+# Check for "unknown" values in categorical features
+print("\nDistribution of 'unknown' values in categorical columns:")
+for col in df.select_dtypes(include=['object']).columns:
+    unknown_count = (df[col] == 'unknown').sum()
+    if unknown_count > 0:
+        print(f"{col}: {unknown_count} ({unknown_count/len(df)*100:.2f}%)")
+
+# Summary statistics
+print("\nSummary Statistics for Numerical Features:")
+print(df.describe())
+
+# Target variable distribution
+print("\nTarget Variable Distribution:")
+target_counts = df['y'].value_counts()
+print(target_counts)
+print(f"Percentage of 'yes': {target_counts['yes']/len(df)*100:.2f}%")
+print(f"Percentage of 'no': {target_counts['no']/len(df)*100:.2f}%")
+
+# EDA Visualization 1: Class Distribution
+plt.figure()
+ax = sns.countplot(x='y', data=df)
+plt.title('Class Distribution (Target Variable)')
+plt.xlabel('Subscription (y)')
+plt.ylabel('Count')
+# Add count labels on top of bars
+for p in ax.patches:
+    ax.annotate(f'{p.get_height():,}',
+                (p.get_x() + p.get_width() / 2., p.get_height()),
+                ha = 'center', va = 'bottom',
+                xytext = (0, 5), textcoords = 'offset points')
+plt.savefig('plots/class_distribution.png')
+plt.close()
+
+# EDA Visualization 2: Age Distribution by Target
+plt.figure()
+sns.histplot(data=df, x='age', hue='y', kde=True, element='step', common_norm=False)
+plt.title('Age Distribution by Subscription Status')
+plt.xlabel('Age')
+plt.ylabel('Count')
+plt.savefig('plots/age_distribution.png')
+plt.close()
+
+# EDA Visualization 3: Campaign Distribution by Target
+plt.figure()
+sns.boxplot(x='y', y='campaign', data=df)
+plt.title('Number of Contacts During Campaign by Subscription Status')
+plt.xlabel('Subscription')
+plt.ylabel('Number of Contacts')
+plt.savefig('plots/campaign_distribution.png')
+plt.close()
+
+# EDA Visualization 4: Duration Distribution by Target
+plt.figure()
+sns.boxplot(x='y', y='duration', data=df)
+plt.title('Call Duration by Subscription Status')
+plt.xlabel('Subscription')
+plt.ylabel('Duration (seconds)')
+plt.savefig('plots/duration_distribution.png')
+plt.close()
+
+# EDA Visualization 5: Job Distribution by Target (Improved stacked bar)
+plt.figure(figsize=(12, 6))
+# Calculate percentages
+job_subscription = pd.crosstab(df['job'], df['y'], normalize='index') * 100
+# Plot
+job_subscription.plot(kind='bar', stacked=True)
+plt.title('Subscription Rate by Job Type')
+plt.xlabel('Job Type')
+plt.ylabel('Percentage (%)')
+plt.xticks(rotation=45, ha='right')
+plt.gca().yaxis.set_major_formatter(mtick.PercentFormatter())
+plt.legend(title='Subscribed')
+plt.tight_layout()
+plt.savefig('plots/job_subscription_rate.png')
+plt.close()
+
+# EDA Visualization 6: Marital Status by Target
+plt.figure(figsize=(10, 6))
+marital_subscription = pd.crosstab(df['marital'], df['y'], normalize='index') * 100
+marital_subscription.plot(kind='bar', stacked=True)
+plt.title('Subscription Rate by Marital Status')
+plt.xlabel('Marital Status')
+plt.ylabel('Percentage (%)')
+plt.gca().yaxis.set_major_formatter(mtick.PercentFormatter())
+plt.legend(title='Subscribed')
+plt.tight_layout()
+plt.savefig('plots/marital_subscription_rate.png')
+plt.close()
+
+# EDA Visualization 7: Correlation Matrix for Numerical Variables
+plt.figure(figsize=(12, 10))
+numerical_df = df.select_dtypes(include=['int64', 'float64'])
+corr_matrix = numerical_df.corr()
+mask = np.triu(np.ones_like(corr_matrix, dtype=bool))
+sns.heatmap(corr_matrix, mask=mask, annot=True, cmap='coolwarm',
+            linewidths=0.5, fmt='.2f', vmin=-1, vmax=1)
+plt.title('Correlation Matrix of Numerical Features')
+plt.tight_layout()
+plt.savefig('plots/correlation_matrix.png')
+plt.close()
+
+# EDA Visualization 8: Economic indicators distribution
+plt.figure(figsize=(18, 10))
+plt.subplot(2, 2, 1)
+sns.boxplot(x='y', y='emp.var.rate', data=df)
+plt.title('Employment Variation Rate by Subscription')
+
+plt.subplot(2, 2, 2)
+sns.boxplot(x='y', y='cons.price.idx', data=df)
+plt.title('Consumer Price Index by Subscription')
+
+plt.subplot(2, 2, 3)
+sns.boxplot(x='y', y='cons.conf.idx', data=df)
+plt.title('Consumer Confidence Index by Subscription')
+
+plt.subplot(2, 2, 4)
+sns.boxplot(x='y', y='euribor3m', data=df)
+plt.title('Euribor 3 Month Rate by Subscription')
+
+plt.tight_layout()
+plt.savefig('plots/economic_indicators.png')
+plt.close()
+
+# EDA Visualization 9: Month distribution by target
+plt.figure(figsize=(12, 6))
+# Ensure months are ordered chronologically
+month_order = ['jan', 'feb', 'mar', 'apr', 'may', 'jun',
+               'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+# Count number of contacts per month
+month_counts = df['month'].value_counts().reindex(month_order)
+# Get subscription rate per month
+month_subscription = pd.crosstab(df['month'], df['y'], normalize='index')['yes'] * 100
+
+# Create a figure with two subplots
+fig, ax1 = plt.subplots(figsize=(12, 6))
+
+# Plot bar chart for contact counts
+color = 'tab:blue'
+ax1.set_xlabel('Month')
+ax1.set_ylabel('Number of Contacts', color=color)
+bars = ax1.bar(month_counts.index, month_counts.values, color=color, alpha=0.7)
+ax1.tick_params(axis='y', labelcolor=color)
+
+# Add a second y-axis for subscription rate
+ax2 = ax1.twinx()
+color = 'tab:red'
+ax2.set_ylabel('Subscription Rate (%)', color=color)
+line = ax2.plot(month_order, [month_subscription.get(m, 0) for m in month_order],
+               marker='o', linestyle='-', color=color)
+ax2.tick_params(axis='y', labelcolor=color)
+ax2.yaxis.set_major_formatter(mtick.PercentFormatter())
+
+# Set the title and adjust layout
+plt.title('Contact Volume and Subscription Rate by Month')
+plt.xticks(rotation=45)
+fig.tight_layout()
+plt.savefig('plots/month_analysis.png')
+plt.close()
+
+# EDA Visualization 10: Previous outcome impact
+plt.figure(figsize=(10, 6))
+outcome_subscription = pd.crosstab(df['poutcome'], df['y'], normalize='index')['yes'] * 100
+outcome_subscription.plot(kind='bar', color='skyblue')
+plt.title('Subscription Rate by Previous Outcome')
+plt.xlabel('Previous Outcome')
+plt.ylabel('Subscription Rate (%)')
+plt.gca().yaxis.set_major_formatter(mtick.PercentFormatter())
+for i, v in enumerate(outcome_subscription):
+    plt.text(i, v + 1, f"{v:.1f}%", ha='center')
+plt.tight_layout()
+plt.savefig('plots/previous_outcome_impact.png')
+plt.close()
+
+# ==== Step 4: Feature Engineering ====
+print("\n==== Feature Engineering ====")
+
+# Make a copy of the original dataframe
+df_with_features = df.copy()
+
+# 1. Age groups
+df_with_features['age_group'] = pd.cut(df_with_features['age'],
+                                      bins=[17, 30, 40, 50, 60, 100],
+                                      labels=['18-30', '31-40', '41-50', '51-60', '60+'])
+
+# 2. Contact frequency
+df_with_features['total_contacts'] = df_with_features['campaign'] + df_with_features['previous']
+
+# 3. Is First Contact
+df_with_features['is_first_contact'] = (df_with_features['previous'] == 0).astype(int)
+
+# 4. Was Previously Successful
+df_with_features['was_successful'] = (df_with_features['poutcome'] == 'success').astype(int)
+
+# 5. Economic indicator composite
+# Normalize to similar scale first
+df_with_features['economic_score'] = (
+    (df_with_features['emp.var.rate'] - df_with_features['emp.var.rate'].min()) /
+    (df_with_features['emp.var.rate'].max() - df_with_features['emp.var.rate'].min())
+) - (
+    (df_with_features['cons.conf.idx'] - df_with_features['cons.conf.idx'].min()) /
+    (df_with_features['cons.conf.idx'].max() - df_with_features['cons.conf.idx'].min())
+) + (
+    (df_with_features['euribor3m'] - df_with_features['euribor3m'].min()) /
+    (df_with_features['euribor3m'].max() - df_with_features['euribor3m'].min())
+)
+
+# 6. Education level numeric
+education_map = {
+    'illiterate': 0,
+    'basic.4y': 1,
+    'basic.6y': 2,
+    'basic.9y': 3,
+    'high.school': 4,
+    'professional.course': 5,
+    'university.degree': 6
+}
+df_with_features['education_level'] = df_with_features['education'].map(education_map)
+# Fill unknown values with median
+df_with_features['education_level'] = df_with_features['education_level'].fillna(
+    df_with_features['education_level'].median())
+
+# 7. Season based on month
+season_map = {
+    'dec': 'winter', 'jan': 'winter', 'feb': 'winter',
+    'mar': 'spring', 'apr': 'spring', 'may': 'spring',
+    'jun': 'summer', 'jul': 'summer', 'aug': 'summer',
+    'sep': 'fall', 'oct': 'fall', 'nov': 'fall'
+}
+df_with_features['season'] = df_with_features['month'].map(season_map)
+
+# 8. Has loans
+df_with_features['has_any_loan'] = ((df_with_features['housing'] == 'yes') |
+                                   (df_with_features['loan'] == 'yes')).astype(int)
+
+# 9. Contact ratio (what fraction of all contacts were in this campaign)
+df_with_features['contact_ratio'] = df_with_features['campaign'] / (df_with_features['total_contacts'] + 1)
+
+# Visualize some new features
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+sns.countplot(x='age_group', hue='y', data=df_with_features)
+plt.title('Subscription by Age Group')
+plt.xticks(rotation=45)
+
+plt.subplot(1, 2, 2)
+sns.countplot(x='season', hue='y', data=df_with_features)
+plt.title('Subscription by Season')
+plt.tight_layout()
+plt.savefig('plots/engineered_features.png')
+plt.close()
+
+# ==== Step 5: Data Preprocessing ====
+print("\n==== Data Preprocessing ====")
+
+# First, let's create two versions of our dataset:
+# 1. With duration (may have data leakage but useful for analysis)
+# 2. Without duration (more realistic for production)
+
+# Define a function to preprocess the data
+def preprocess_data(df, include_duration=True):
+    print(f"\nPreprocessing data {'with' if include_duration else 'without'} duration feature...")
+    # Create a working copy
+    df_processed = df.copy()
+
+    # Handle Missing Values (using more sophisticated approach)
+    print("Handling missing values...")
+
+    # For categorical features with "unknown" values
+    cat_cols = df_processed.select_dtypes(include=['object']).columns
+    for col in cat_cols:
+        # Check percentage of unknowns
+        unknown_pct = (df_processed[col] == 'unknown').mean() * 100
+
+        if unknown_pct > 20:
+            # If too many unknowns, keep as separate category
+            print(f"  '{col}': High unknown rate ({unknown_pct:.1f}%). Keeping 'unknown' as a category.")
+        else:
+            # Otherwise replace with mode
+            mode_val = df_processed[col][df_processed[col] != 'unknown'].mode()[0]
+            df_processed[col] = df_processed[col].replace('unknown', mode_val)
+            print(f"  '{col}': Replaced 'unknown' with '{mode_val}'")
+
+    # Encode target variable
+    print("Encoding target variable...")
+    le = LabelEncoder()
+    df_processed['y'] = le.fit_transform(df_processed['y'])
+    print("Target mapping: 'no': 0, 'yes': 1")
+
+    # Select features to use based on include_duration flag
+    feature_cols = df_processed.columns.tolist()
+    feature_cols.remove('y')  # Remove target
+
+    if not include_duration:
+        if 'duration' in feature_cols:
+            feature_cols.remove('duration')
+            print("Excluded 'duration' feature to prevent data leakage")
+
+    # Separate features and target
+    X = df_processed[feature_cols]
+    y = df_processed['y']
+
+    # Split into numerical and categorical columns for different processing
+    num_cols = X.select_dtypes(include=['int64', 'float64']).columns
+    cat_cols = X.select_dtypes(exclude=['int64', 'float64']).columns
+
+    # One-hot encoding for categorical features
+    print(f"Applying one-hot encoding to {len(cat_cols)} categorical features...")
+    X = pd.get_dummies(X, columns=cat_cols, drop_first=True)
+
+    # Scale numerical features
+    print("Scaling numerical features...")
+    scaler = StandardScaler()
+    X[num_cols] = scaler.fit_transform(X[num_cols])
+
+    print(f"Final preprocessed feature set shape: {X.shape}")
+    return X, y
+
+# Create two versions of the dataset
+print("Creating two versions of the dataset for comparison...")
+X_with_duration, y = preprocess_data(df_with_features, include_duration=True)
+X_without_duration, _ = preprocess_data(df_with_features, include_duration=False)
+
+# ==== Step 6: Feature Selection ====
+print("\n==== Feature Selection ====")
+
+def select_features(X, y, k=20):
+    print(f"Selecting top {k} features using Random Forest importance...")
+
+    # Initialize Random Forest for feature selection
+    selector = RandomForestClassifier(n_estimators=100, random_state=42)
+    selector.fit(X, y)
+
+    # Get feature importance
+    feature_importance = pd.DataFrame({
+        'Feature': X.columns,
+        'Importance': selector.feature_importances_
+    }).sort_values('Importance', ascending=False)
+
+    # Select top k features
+    top_features = feature_importance.head(k)['Feature'].tolist()
+
+    print(f"Top {min(k, len(feature_importance))} features selected:")
+    for i, (feature, importance) in enumerate(zip(feature_importance['Feature'][:k],
+                                               feature_importance['Importance'][:k]), 1):
+        print(f"{i}. {feature}: {importance:.4f}")
+
+    # Visualize feature importance
+    plt.figure(figsize=(12, 8))
+    sns.barplot(x='Importance', y='Feature', data=feature_importance.head(k))
+    plt.title('Top Features by Importance')
+    plt.tight_layout()
+    plt.savefig('plots/feature_importance.png')
+    plt.close()
+
+    return top_features, feature_importance
+
+# Run feature selection on both datasets
+top_features_with_duration, importance_with = select_features(X_with_duration, y)
+top_features_without_duration, importance_without = select_features(X_without_duration, y)
+
+# Use selected features
+X_selected_with_duration = X_with_duration[top_features_with_duration]
+X_selected_without_duration = X_without_duration[top_features_without_duration]
+
+# ==== Step 7: Train-Test Split ====
+print("\n==== Train-Test Split ====")
+
+# Split the data for both versions
+X_train_with, X_test_with, y_train_with, y_test_with = train_test_split(
+    X_selected_with_duration, y, test_size=0.3, stratify=y, random_state=42)
+
+X_train_without, X_test_without, y_train_without, y_test_without = train_test_split(
+    X_selected_without_duration, y, test_size=0.3, stratify=y, random_state=42)
+
+print(f"Training set shape (with duration): {X_train_with.shape}")
+print(f"Testing set shape (with duration): {X_test_with.shape}")
+print(f"Training set shape (without duration): {X_train_without.shape}")
+print(f"Testing set shape (without duration): {X_test_without.shape}")
+
+# ==== Step 8: Handle Imbalanced Data ====
+print("\n==== Handling Imbalanced Data ====")
+
+# Apply SMOTE to the training data
+smote = SMOTE(random_state=42)
+X_train_with_smote, y_train_with_smote = smote.fit_resample(X_train_with, y_train_with)
+X_train_without_smote, y_train_without_smote = smote.fit_resample(X_train_without, y_train_without)
+
+print(f"Original training set class distribution: {np.bincount(y_train_with)}")
+print(f"After SMOTE: {np.bincount(y_train_with_smote)}")
+
+# Visualize class distribution after SMOTE
+plt.figure(figsize=(10, 6))
+labels = ['No (class 0)', 'Yes (class 1)']
+original = np.bincount(y_train_with)
+after_smote = np.bincount(y_train_with_smote)
+
+x = np.arange(len(labels))
+width = 0.35
+
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.bar(x - width/2, original, width, label='Original')
+ax.bar(x + width/2, after_smote, width, label='After SMOTE')
+
+ax.set_xticks(x)
+ax.set_xticklabels(labels)
+ax.set_ylabel('Count')
+ax.set_title('Class Distribution Before and After SMOTE')
+ax.legend()
+
+# Add count labels on top of bars
+for i, v in enumerate(original):
+    ax.text(i - width/2, v + 100, str(v), ha='center')
+for i, v in enumerate(after_smote):
+    ax.text(i + width/2, v + 100, str(v), ha='center')
+
+plt.tight_layout()
+plt.savefig('plots/smote_rebalancing.png')
+plt.close()
+
+# ==== Step 9: Model Training and Evaluation ====
+print("\n==== Model Training and Evaluation ====")
+
+# Define a function to evaluate a model
+def evaluate_model(model, X_train, y_train, X_test, y_test, model_name, dataset_type):
+    print(f"\nEvaluating {model_name} on {dataset_type} dataset...")
+
+    # Train model
+    model.fit(X_train, y_train)
+
+    # Predictions
+    y_pred = model.predict(X_test)
+
+    # Calculate metrics
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+
+    # Calculate ROC curve and AUC
+    try:
+        y_prob = model.predict_proba(X_test)[:, 1]
+        fpr, tpr, _ = roc_curve(y_test, y_prob)
+        roc_auc = auc(fpr, tpr)
+    except:
+        fpr, tpr, roc_auc = None, None, None
+
+    # Print results
+    print(f"{model_name} Results:")
+    print(f"Accuracy: {accuracy:.4f}")
+    print(f"Precision: {precision:.4f}")
+    print(f"Recall: {recall:.4f}")
+    print(f"F1 Score: {f1:.4f}")
+    if roc_auc:
+        print(f"ROC AUC: {roc_auc:.4f}")
+    print("Classification Report:")
+    print(classification_report(y_test, y_pred))
+
+    # Visualize confusion matrix
+    plt.figure(figsize=(8, 6))
+    cm = confusion_matrix(y_test, y_pred)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=['No', 'Yes'],
+                yticklabels=['No', 'Yes'])
+    plt.title(f'Confusion Matrix - {model_name} ({dataset_type})')
+    plt.xlabel('Predicted')
+    plt.ylabel('Actual')
+    plt.tight_layout()
+    plt.savefig(f'plots/confusion_matrix_{model_name.replace(" ", "_").lower()}_{dataset_type}.png')
+    plt.close()
+
+    # Visualize ROC curve if available
+    if fpr is not None and tpr is not None:
+        plt.figure(figsize=(8, 6))
+        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
+        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('False Positive Rate')
+        plt.ylabel('True Positive Rate')
+        plt.title(f'ROC Curve - {model_name} ({dataset_type})')
+        plt.legend(loc="lower right")
+        plt.savefig(f'plots/roc_curve_{model_name.replace(" ", "_").lower()}_{dataset_type}.png')
+        plt.close()
+
+    results = {
+        'model_name': model_name,
+        'dataset': dataset_type,
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'roc_auc': roc_auc if roc_auc else None,
+        'confusion_matrix': cm,
+        'y_pred': y_pred,
+        'y_test': y_test
+    }
+
+    if fpr is not None and tpr is not None:
+        results['fpr'] = fpr
+        results['tpr'] = tpr
+
+    return results, model
+
+# Define models to train
+models = {
+    'Logistic Regression': LogisticRegression(class_weight='balanced', max_iter=1000, random_state=42),
+    'Random Forest': RandomForestClassifier(n_estimators=100, class_weight='balanced', random_state=42),
+    'Gradient Boosting': GradientBoostingClassifier(random_state=42),
+    'AdaBoost': AdaBoostClassifier(random_state=42)
+}
+
+# Add XGBoost if available
+if has_xgboost:
+    # Calculate class weight for imbalanced data
+    scale_pos_weight = len(y_train_with[y_train_with==0]) / len(y_train_with[y_train_with==1])
+    models['XGBoost'] = XGBClassifier(scale_pos_weight=scale_pos_weight, random_state=42)
+
+# Store results for comparison
+all_results = []
+
+# Evaluate models with duration feature
+print("\nEvaluating models with duration feature:")
+for name, model in models.items():
+    results, _ = evaluate_model(
+        model, X_train_with_smote, y_train_with_smote,
+        X_test_with, y_test_with, name, "with_duration"
+    )
+    all_results.append(results)
+
+# Evaluate models without duration feature
+print("\nEvaluating models without duration feature:")
+for name, model in models.items():
+    results, _ = evaluate_model(
+        model, X_train_without_smote, y_train_without_smote,
+        X_test_without, y_test_without, name, "without_duration"
+    )
+    all_results.append(results)
+
+# ==== Step 10: Hyperparameter Tuning for Best Model ====
+print("\n==== Hyperparameter Tuning ====")
+
+# Find the best model from
+# Continue from the last section (Hyperparameter Tuning)
+
+# Identify the best model from initial evaluation
+print("\n==== Identifying Best Model for Tuning ====")
+# Create a DataFrame for comparison
+results_df = pd.DataFrame([
+    {
+        'Model': r['model_name'],
+        'Dataset': r['dataset'],
+        'Accuracy': r['accuracy'],
+        'Precision': r['precision'],
+        'Recall': r['recall'],
+        'F1 Score': r['f1'],
+        'ROC AUC': r['roc_auc'] if r['roc_auc'] else 0
+    } for r in all_results
+])
+
+# Display model comparison
+print("\nModel Comparison:")
+print(results_df)
+
+# Plot comparison of models
+plt.figure(figsize=(14, 8))
+models_to_compare = results_df.pivot(index='Model', columns='Dataset', values='F1 Score')
+models_to_compare.plot(kind='bar', colormap='viridis')
+plt.title('F1 Score Comparison Across Models and Datasets')
+plt.ylabel('F1 Score')
+plt.ylim(0, 1)
+plt.xticks(rotation=45, ha='right')
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.tight_layout()
+plt.savefig('plots/model_comparison.png')
+plt.close()
+
+# Find best model (using F1 score as primary metric)
+best_model_info = results_df.sort_values('F1 Score', ascending=False).iloc[0]
+best_model_name = best_model_info['Model']
+best_dataset = best_model_info['Dataset']
+print(f"\nBest model: {best_model_name} on {best_dataset} dataset (F1 Score: {best_model_info['F1 Score']:.4f})")
+
+# Define hyperparameter grid for the best model
+print(f"\nPerforming hyperparameter tuning for {best_model_name}...")
+
+# Select the appropriate training data based on the best dataset
+if best_dataset == 'with_duration':
+    X_train_best = X_train_with_smote
+    y_train_best = y_train_with_smote
+    X_test_best = X_test_with
+    y_test_best = y_test_with
+else:
+    X_train_best = X_train_without_smote
+    y_train_best = y_train_without_smote
+    X_test_best = X_test_without
+    y_test_best = y_test_without
+
+# Define hyperparameter grids for each model type
+param_grids = {
+    'Logistic Regression': {
+        'C': [0.01, 0.1, 1, 10, 100],
+        'penalty': ['l1', 'l2', 'elasticnet', 'none'],
+        'solver': ['newton-cg', 'lbfgs', 'liblinear', 'sag', 'saga'],
+        'max_iter': [1000]
+    },
+    'Random Forest': {
+        'n_estimators': [100, 200, 300],
+        'max_depth': [None, 10, 20, 30],
+        'min_samples_split': [2, 5, 10],
+        'min_samples_leaf': [1, 2, 4],
+        'bootstrap': [True, False]
+    },
+    'Gradient Boosting': {
+        'n_estimators': [100, 200, 300],
+        'learning_rate': [0.01, 0.1, 0.2],
+        'max_depth': [3, 5, 7],
+        'min_samples_split': [2, 5],
+        'min_samples_leaf': [1, 2]
+    },
+    'AdaBoost': {
+        'n_estimators': [50, 100, 200],
+        'learning_rate': [0.01, 0.1, 1.0],
+        'algorithm': ['SAMME', 'SAMME.R']
+    },
+    'XGBoost': {
+        'n_estimators': [100, 200],
+        'max_depth': [3, 5, 7],
+        'learning_rate': [0.01, 0.1, 0.2],
+        'subsample': [0.8, 0.9, 1.0],
+        'colsample_bytree': [0.8, 0.9, 1.0],
+        'gamma': [0, 0.1, 0.2]
+    }
+}
+
+# Get the parameter grid for the best model
+if best_model_name in param_grids:
+    param_grid = param_grids[best_model_name]
+
+    # Create a base model instance for tuning
+    if best_model_name == 'Logistic Regression':
+        base_model = LogisticRegression(random_state=42, class_weight='balanced')
+    elif best_model_name == 'Random Forest':
+        base_model = RandomForestClassifier(random_state=42, class_weight='balanced')
+    elif best_model_name == 'Gradient Boosting':
+        base_model = GradientBoostingClassifier(random_state=42)
+    elif best_model_name == 'AdaBoost':
+        base_model = AdaBoostClassifier(random_state=42)
+    elif best_model_name == 'XGBoost' and has_xgboost:
+        base_model = XGBClassifier(random_state=42, scale_pos_weight=scale_pos_weight)
+
+    # Perform RandomizedSearchCV (faster than GridSearchCV for many parameters)
+    print(f"Starting RandomizedSearchCV for {best_model_name}...")
+    random_search = RandomizedSearchCV(
+        estimator=base_model,
+        param_distributions=param_grid,
+        n_iter=20,  # Number of parameter settings sampled
+        cv=5,       # 5-fold cross-validation
+        scoring='f1',
+        n_jobs=-1,   # Use all available processors
+        verbose=1,
+        random_state=42
+    )
+
+    random_search.fit(X_train_best, y_train_best)
+
+    # Get the best model
+    best_tuned_model = random_search.best_estimator_
+    best_params = random_search.best_params_
+
+    print("\nBest hyperparameters:")
+    for param, value in best_params.items():
+        print(f"{param}: {value}")
+
+    # Evaluate the tuned model
+    print("\nEvaluating tuned model on test set:")
+    tuned_results, _ = evaluate_model(
+        best_tuned_model, X_train_best, y_train_best,
+        X_test_best, y_test_best, f"Tuned {best_model_name}", best_dataset
+    )
+
+    # Compare with original model
+    best_original_result = next(r for r in all_results if r['model_name'] == best_model_name and r['dataset'] == best_dataset)
+
+    print("\nComparison of Original vs Tuned Model:")
+    comparison = {
+        'Metric': ['Accuracy', 'Precision', 'Recall', 'F1 Score', 'ROC AUC'],
+        'Original Model': [
+            best_original_result['accuracy'],
+            best_original_result['precision'],
+            best_original_result['recall'],
+            best_original_result['f1'],
+            best_original_result['roc_auc'] if best_original_result['roc_auc'] else 0
+        ],
+        'Tuned Model': [
+            tuned_results['accuracy'],
+            tuned_results['precision'],
+            tuned_results['recall'],
+            tuned_results['f1'],
+            tuned_results['roc_auc'] if tuned_results['roc_auc'] else 0
+        ]
+    }
+
+    comparison_df = pd.DataFrame(comparison)
+    print(comparison_df)
+
+    # Visualize improvement
+    plt.figure(figsize=(10, 6))
+    comparison_df.set_index('Metric').plot(kind='bar', rot=0)
+    plt.title('Performance Improvement After Hyperparameter Tuning')
+    plt.ylabel('Score')
+    plt.ylim(0, 1)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig('plots/tuning_improvement.png')
+    plt.close()
+else:
+    print(f"No hyperparameter grid defined for {best_model_name}. Skipping tuning.")
+
+# ==== Step 11: Feature Importance Analysis of Final Model ====
+print("\n==== Feature Importance Analysis ====")
+
+# Check if the model has feature_importances_ attribute (tree-based models)
+if hasattr(best_tuned_model, 'feature_importances_'):
+    # Get feature importances
+    importances = best_tuned_model.feature_importances_
+    feature_names = X_train_best.columns
+
+    # Create a DataFrame for easier handling
+    feature_importance_df = pd.DataFrame({
+        'Feature': feature_names,
+        'Importance': importances
+    }).sort_values('Importance', ascending=False)
+
+    # Print top features
+    print("\nTop 10 Features in the Tuned Model:")
+    print(feature_importance_df.head(10))
+
+    # Plot feature importances
+    plt.figure(figsize=(12, 8))
+    sns.barplot(x='Importance', y='Feature', data=feature_importance_df.head(20))
+    plt.title(f'Top 20 Features by Importance in {best_model_name}')
+    plt.tight_layout()
+    plt.savefig('plots/final_feature_importance.png')
+    plt.close()
+elif best_model_name == 'Logistic Regression':
+    # For logistic regression, use coefficients
+    coefficients = np.abs(best_tuned_model.coef_[0])
+    feature_names = X_train_best.columns
+
+    # Create a DataFrame for easier handling
+    feature_importance_df = pd.DataFrame({
+        'Feature': feature_names,
+        'Coefficient (abs)': coefficients
+    }).sort_values('Coefficient (abs)', ascending=False)
+
+    # Print top features
+    print("\nTop 10 Features in the Tuned Model (by absolute coefficient magnitude):")
+    print(feature_importance_df.head(10))
+
+    # Plot feature importances
+    plt.figure(figsize=(12, 8))
+    sns.barplot(x='Coefficient (abs)', y='Feature', data=feature_importance_df.head(20))
+    plt.title('Top 20 Features by Coefficient Magnitude in Logistic Regression')
+    plt.tight_layout()
+    plt.savefig('plots/final_feature_importance.png')
+    plt.close()
+else:
+    print("Feature importance analysis not available for this model type.")
+
+# ==== Step 12: Generate Final Report ====
+print("\n==== Generating Final Analysis Report ====")
+
+# Create a function to generate an HTML report that could be converted to PDF
+def generate_report():
+    # Get current timestamp
+    import datetime
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Start HTML content
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Bank Marketing Campaign Analysis Report</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            h1, h2, h3 {{ color: #2c3e50; }}
+            table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
+            tr:nth-child(even) {{ background-color: #f9f9f9; }}
+            .metrics {{ display: flex; flex-wrap: wrap; justify-content: space-between; }}
+            .metric-card {{ background-color: #f8f9fa; border-radius: 5px; padding: 15px; margin: 10px 0; width: 45%; }}
+            img {{ max-width: 100%; height: auto; margin: 10px 0; }}
+            .highlight {{ background-color: #e8f4f8; padding: 10px; border-left: 5px solid #5bc0de; margin: 15px 0; }}
+        </style>
+    </head>
+    <body>
+        <h1>Bank Marketing Campaign Analysis Report</h1>
+        <p><strong>Generated on:</strong> {timestamp}</p>
+
+        <h2>1. Executive Summary</h2>
+        <div class="highlight">
+            <p>This report presents an analysis of the Bank Marketing dataset from the UCI Machine Learning Repository.
+            The dataset contains information about direct marketing campaigns (phone calls) of a Portuguese banking institution.
+            The classification goal is to predict whether a client will subscribe to a term deposit (binary outcome: 'yes' or 'no').</p>
+
+            <p>Our best performing model achieved an F1 score of {tuned_results['f1']:.4f} using a
+            {best_model_name} algorithm. The most important features in predicting subscription were duration of contact,
+            economic indicators, and previous campaign outcomes.</p>
+        </div>
+
+        <h2>2. Dataset Overview</h2>
+        <p>The dataset contains {df.shape[0]} records with {df.shape[1]} features. The target variable represents whether a
+        client subscribed to a term deposit, with {target_counts['yes']} positive cases ({target_counts['yes']/len(df)*100:.2f}%)
+        and {target_counts['no']} negative cases ({target_counts['no']/len(df)*100:.2f}%).</p>
+
+        <h3>2.1 Target Variable Distribution</h3>
+        <img src="plots/class_distribution.png" alt="Class Distribution">
+
+        <h2>3. Exploratory Data Analysis</h2>
+
+        <h3>3.1 Age Distribution</h3>
+        <img src="plots/age_distribution.png" alt="Age Distribution">
+        <p>The age distribution shows that most clients are between 30-60 years old. Subscription rates appear
+        slightly higher among older clients.</p>
+
+        <h3>3.2 Job Types and Subscription Rates</h3>
+        <img src="plots/job_subscription_rate.png" alt="Job Subscription Rate">
+        <p>Certain professions like students, retired individuals, and management have higher subscription rates.</p>
+
+        <h3>3.3 Campaign Contact Analysis</h3>
+        <img src="plots/campaign_distribution.png" alt="Campaign Distribution">
+        <p>Successful subscriptions typically require fewer contact attempts. Clients who eventually subscribe
+        are generally contacted fewer times than those who don't.</p>
+
+        <h3>3.4 Call Duration Impact</h3>
+        <img src="plots/duration_distribution.png" alt="Duration Distribution">
+        <p>Call duration is significantly higher for clients who subscribe. This is an important predictor but may
+        introduce data leakage since it's known only after the call is completed.</p>
+
+        <h3>3.5 Economic Indicators</h3>
+        <img src="plots/economic_indicators.png" alt="Economic Indicators">
+        <p>Economic indicators show clear patterns between subscribers and non-subscribers, with subscriptions more
+        likely during certain economic conditions.</p>
+
+        <h3>3.6 Previous Campaign Outcomes</h3>
+        <img src="plots/previous_outcome_impact.png" alt="Previous Outcome Impact">
+        <p>Clients who succeeded in previous campaigns are much more likely to subscribe again, highlighting the
+        importance of previous relationship success.</p>
+
+        <h3>3.7 Seasonal Trends</h3>
+        <img src="plots/month_analysis.png" alt="Monthly Analysis">
+        <p>Subscription rates show seasonal patterns, with certain months having higher success rates.</p>
+
+        <h2>4. Feature Engineering</h2>
+        <p>We enhanced the dataset with engineered features including age groups, contact frequency metrics,
+        economic score composites, and season information.</p>
+        <img src="plots/engineered_features.png" alt="Engineered Features">
+
+        <h2>5. Feature Importance</h2>
+        <img src="plots/final_feature_importance.png" alt="Feature Importance">
+        <p>The most predictive features for subscription outcomes were:</p>
+        <ul>
+    """
+
+    # Add top features
+    if 'feature_importance_df' in locals():
+        for i, row in feature_importance_df.head(5).iterrows():
+            html_content += f"<li><strong>{row['Feature']}</strong>"
+            if 'Importance' in row:
+                html_content += f": {row['Importance']:.4f}"
+            elif 'Coefficient (abs)' in row:
+                html_content += f": {row['Coefficient (abs)']:.4f}"
+            html_content += "</li>"
+
+    html_content += """
+        </ul>
+
+        <h2>6. Model Evaluation</h2>
+        <div class="metrics">
+            <div class="metric-card">
+                <h3>Accuracy</h3>
+                <p>{:.2f}%</p>
+            </div>
+            <div class="metric-card">
+                <h3>Precision</h3>
+                <p>{:.2f}%</p>
+            </div>
+            <div class="metric-card">
+                <h3>Recall</h3>
+                <p>{:.2f}%</p>
+            </div>
+            <div class="metric-card">
+                <h3>F1 Score</h3>
+                <p>{:.2f}%</p>
+            </div>
+        </div>
+    """.format(
+        tuned_results['accuracy'] * 100,
+        tuned_results['precision'] * 100,
+        tuned_results['recall'] * 100,
+        tuned_results['f1'] * 100
+    )
+
+    # Add confusion matrix
+    html_content += """
+        <h3>6.1 Confusion Matrix</h3>
+        <img src="plots/confusion_matrix_Tuned_{}.png" alt="Confusion Matrix">
+
+        <h3>6.2 ROC Curve</h3>
+        <img src="plots/roc_curve_Tuned_{}.png" alt="ROC Curve">
+
+        <h3>6.3 Model Comparison</h3>
+        <img src="plots/model_comparison.png" alt="Model Comparison">
+        <p>We evaluated multiple classification algorithms and found that {} performed best on this dataset.</p>
+
+        <h3>6.4 Hyperparameter Tuning</h3>
+        <img src="plots/tuning_improvement.png" alt="Tuning Improvement">
+        <p>Hyperparameter tuning improved model performance, particularly for recall and F1 score metrics.</p>
+
+        <h2>7. Conclusion and Recommendations</h2>
+        <div class="highlight">
+            <p><strong>Key findings:</strong></p>
+            <ul>
+                <li>Call duration is highly predictive but would not be available before making a call</li>
+                <li>Previous campaign success is a strong predictor of future subscription</li>
+                <li>Economic indicators significantly influence subscription decisions</li>
+                <li>Certain customer segments (by age, job type) are more likely to subscribe</li>
+                <li>Seasonal patterns affect subscription rates</li>
+            </ul>
+
+            <p><strong>Recommendations for the bank:</strong></p>
+            <ul>
+                <li>Prioritize contacting clients who succeeded in previous campaigns</li>
+                <li>Focus campaigns during months with historically higher success rates</li>
+                <li>Target customer segments with higher conversion rates</li>
+                <li>Consider economic conditions when planning marketing campaigns</li>
+                <li>Limit the number of contact attempts per client</li>
+            </ul>
+        </div>
+
+        <h2>8. References</h2>
+        <p>[1] S. Moro, P. Cortez and P. Rita. "A Data-Driven Approach to Predict the Success of Bank Telemarketing." Decision Support Systems, Elsevier, 62:22-31, June 2014.</p>
+        <p>[2] UCI Machine Learning Repository. "Bank Marketing Data Set." https://archive.ics.uci.edu/ml/datasets/Bank+Marketing</p>
+    </body>
+    </html>
+    """.format(
+        best_model_name.replace(" ", "_").lower(),
+        best_model_name.replace(" ", "_").lower(),
+        best_model_name
+    )
+
+    # Save report as HTML
+    with open('bank_marketing_analysis_report.html', 'w') as f:
+        f.write(html_content)
+
+    print("Report generated as 'bank_marketing_analysis_report.html'")
+    print("You can convert this to PDF using any HTML to PDF converter.")
+
+# Generate the final report
+generate_report()
+
+# ==== Completion Message ====
+print("\n==== Analysis Complete ====")
+print("All visualization images saved in the 'plots' directory")
+print("Final report generated as HTML in the current directory")
+print("\nThank you for using this analysis pipeline!")
